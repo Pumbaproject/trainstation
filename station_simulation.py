@@ -2,15 +2,14 @@
 import random
 import math
 
-# настройки
 T_MODEL_HOURS = 24 * 30      # Время моделирования: 30 суток (720 часов)
 LAMBDA = 1 / 8               # Интенсивность прихода составов: 1/8 состава в час
 ALPHA = 0.95                 # Доверительная вероятность
 EPS = 0.2                    # Требуемая точность 20%
-TA = 1.96                    # Квантиль нормального распределения для ALPHA=0.95
+TA = 1.96                    # Квантиль для ALPHA=0.95
 
 
-# генераторы случ чисел
+# генератор случ чисел
 def exp_random(mean: float) -> float:
     """Экспоненциальное распределение с заданным средним"""
     return -mean * math.log(1 - random.random())
@@ -40,24 +39,56 @@ def poisson_random(lam: float) -> int:
     return k - 1
 
 
+def get_uncoupling_time() -> float:
+    """Генерация времени расцепки одной секции (часы)"""
+    if random.random() < 0.1:
+        uncoupling_min = 30.0
+    else:
+        uncoupling_min = normal_random(5.0, 2.0)
+        uncoupling_min = max(1.0, uncoupling_min)
+    return uncoupling_min / 60.0
+
+
+# структура секции
+class Section:
+    """Секция вагонов"""
+    def __init__(self, wagon_count: int, direction: int, is_urgent: bool, arrival_time: float):
+        self.wagon_count = wagon_count      # количество вагонов
+        self.direction = direction          # направление 1..7
+        self.is_urgent = is_urgent          # срочность
+        self.arrival_time = arrival_time    # время прибытия состава
+        self.uncoupling_time = get_uncoupling_time()  # время расцепки
+        self.moving_time = 2.0 / 4.0        # 2 км / 4 км/ч = 0.5 часа
+        self.total_time = self.uncoupling_time + self.moving_time  # общее время обработки
+
+
 # имитационная модель
 class SortingStation:
     """Модель сортировочной станции"""
 
     def __init__(self, num_tracks: int):
         self.num_tracks = num_tracks
+
         self.tracks_free_time = [0.0] * num_tracks
-        self.section_queue = []
+
         self.accumulation = [0] * 8
+
+        self.urgent_direction = None
+
+        self.direction_queue = list(range(1, 8))
+        self.direction_queue_index = 0
+
         self.total_wagons = 0
         self.total_residence_time = 0.0
         self.composition_count = 0
+        self.current_time = 0.0
 
-    def _get_free_track(self) -> int:
-        """Найти первую свободную ветку. Возвращает -1, если все заняты"""
-        current_time = self.current_time
+        self.total_busy_time = 0.0
+
+    def _get_free_track(self):
+        """Найти первую свободную ветку. Возвращает индекс или -1"""
         for i, free_time in enumerate(self.tracks_free_time):
-            if free_time <= current_time:
+            if free_time <= self.current_time:
                 return i
         return -1
 
@@ -71,91 +102,129 @@ class SortingStation:
                 earliest_idx = i
         return earliest_idx, earliest_time
 
-    def _process_section(self, wagon_count: int, direction: int, processing_time: float, arrival_time: float):
-        """Обработать одну секцию"""
-        current_time = self.current_time
+    def _get_next_direction(self):
+        """Получить следующее направление из очереди (циклическая)"""
+        direction = self.direction_queue[self.direction_queue_index]
+        self.direction_queue_index = (self.direction_queue_index + 1) % len(self.direction_queue)
+        return direction
+
+    def _process_section(self, section: Section):
+        """Обработать одну секцию: занять ветку, обновить накопление"""
 
         track_idx = self._get_free_track()
 
         if track_idx >= 0:
-            start_time = current_time
-            self.tracks_free_time[track_idx] = start_time + processing_time
+            start_time = self.current_time
+            self.tracks_free_time[track_idx] = start_time + section.total_time
         else:
             track_idx, free_time = self._get_earliest_track()
             start_time = free_time
-            self.tracks_free_time[track_idx] = start_time + processing_time
+            self.tracks_free_time[track_idx] = start_time + section.total_time
 
-        self.accumulation[direction] += wagon_count
-        residence_time = (start_time + processing_time) - arrival_time
-        self.total_residence_time += wagon_count * residence_time
-        self.total_wagons += wagon_count
+        self.total_busy_time += section.total_time
+
+        self.accumulation[section.direction] += section.wagon_count
+
+        if section.is_urgent:
+            self.urgent_direction = section.direction
+
+        # Время пребывания вагонов
+        finish_time = start_time + section.total_time
+        residence_time = finish_time - section.arrival_time
+        self.total_residence_time += section.wagon_count * residence_time
+        self.total_wagons += section.wagon_count
 
     def _try_form_composition(self):
         """Проверить и сформировать состав при накоплении >= 50"""
+        formed = False
+
+        if self.urgent_direction is not None:
+            if self.accumulation[self.urgent_direction] >= 50:
+                self.composition_count += 1
+                self.accumulation[self.urgent_direction] = 0
+                self.urgent_direction = None
+                formed = True
+                return True
+
         for direction in range(1, 8):
             if self.accumulation[direction] >= 50:
                 self.composition_count += 1
                 self.accumulation[direction] = 0
-                return True
-        return False
+                formed = True
 
-    def run(self, simulation_time: float, train_arrival_times: list) -> dict:
+        return formed
+
+    def _generate_train_sections(self, arrival_time: float) -> list:
+        """Генерация всех секций одного состава"""
+        num_sections = uniform_int_random(2, 7)
+        sections = []
+
+        for _ in range(num_sections):
+            wagon_count = poisson_random(3)
+            if wagon_count == 0:
+                wagon_count = 1
+
+            direction = random.randint(1, 7)
+            is_urgent = random.random() < 0.05
+
+            sections.append(Section(wagon_count, direction, is_urgent, arrival_time))
+
+        return sections
+
+    def _generate_train_arrival_times(self) -> list:
+        """Генерация всех времён прихода составов"""
+        times = []
+        current_time = 0
+        while current_time < T_MODEL_HOURS:
+            current_time += exp_random(1 / LAMBDA)
+            if current_time < T_MODEL_HOURS:
+                times.append(current_time)
+        return times
+
+    def run(self) -> dict:
         """Запуск моделирования"""
+        # Сброс состояния
         self.current_time = 0.0
         self.total_wagons = 0
         self.total_residence_time = 0.0
         self.composition_count = 0
+        self.total_busy_time = 0.0
         self.tracks_free_time = [0.0] * self.num_tracks
-        self.section_queue = []
         self.accumulation = [0] * 8
+        self.urgent_direction = None
+        self.direction_queue = list(range(1, 8))
+        self.direction_queue_index = 0
 
-        for arrival_time in sorted(train_arrival_times):
-            if arrival_time > simulation_time:
-                break
+        # Генерация всех приходов составов
+        arrival_times = self._generate_train_arrival_times()
 
+        # Обработка каждого состава
+        for arrival_time in arrival_times:
             self.current_time = arrival_time
 
-            # Генерация состава
-            num_sections = uniform_int_random(2, 7)
-
-            sections_data = []
-            for _ in range(num_sections):
-                wagon_count = poisson_random(3)
-                if wagon_count == 0:
-                    wagon_count = 1
-
-                direction = random.randint(1, 7)
-
-                # Время расцепки
-                if random.random() < 0.1:
-                    uncoupling_min = 30.0
-                else:
-                    uncoupling_min = normal_random(5.0, 2.0)
-                    uncoupling_min = max(1.0, uncoupling_min)
-
-                uncoupling_hours = uncoupling_min / 60.0
-                moving_hours = 0.5  # 2 км / 4 км/ч
-                processing_time = uncoupling_hours + moving_hours
-
-                sections_data.append((wagon_count, direction, processing_time))
+            # Генерация секций состава
+            sections = self._generate_train_sections(arrival_time)
 
             # Обработка секций
-            for wc, direc, proc_time in sections_data:
-                self._process_section(wc, direc, proc_time, arrival_time)
+            for section in sections:
+                self._process_section(section)
                 self._try_form_composition()
 
-            while self._try_form_composition():
-                pass
+            self._try_form_composition()
 
+        # Расчёт итоговых показателей
         if self.total_wagons == 0:
             avg_residence_time = 0
+            avg_track_load = 0
         else:
             avg_residence_time = self.total_residence_time / self.total_wagons
+            avg_track_load = self.total_busy_time / (self.num_tracks * T_MODEL_HOURS) * 100
 
         return {
             'avg_residence_time': avg_residence_time,
             'total_wagons': self.total_wagons,
             'compositions': self.composition_count,
+            'avg_track_load': avg_track_load,
             'tracks': self.num_tracks
         }
 
@@ -165,31 +234,29 @@ def calculate_required_runs(num_tracks: int, initial_runs: int, epsilon: float, 
     """Алгоритм подбора числа реализаций N*"""
     N = initial_runs
     iteration = 0
-    max_iterations = 10
+    max_iterations = 5
 
     while iteration < max_iterations:
         iteration += 1
 
         results = []
         for _ in range(N):
-            train_times = []
-            current_time = 0
-            while current_time < T_MODEL_HOURS:
-                current_time += exp_random(1 / LAMBDA)
-                if current_time < T_MODEL_HOURS:
-                    train_times.append(current_time)
-
             station = SortingStation(num_tracks=num_tracks)
-            res = station.run(T_MODEL_HOURS, train_times)
+            res = station.run()
             results.append(res['avg_residence_time'])
 
+        # Расчёт среднего и СКО
         mean_res = sum(results) / N
         variance = sum((x - mean_res) ** 2 for x in results) / N
         sigma = math.sqrt(variance)
 
-        N_star = int(math.ceil((sigma ** 2 * ta ** 2) / (epsilon ** 2)))
+        # Расчёт необходимого числа реализаций
+        if sigma == 0:
+            N_star = 1
+        else:
+            N_star = int(math.ceil((sigma ** 2 * ta ** 2) / (epsilon ** 2)))
 
-        print(f"  Итерация {iteration}: N={N}, sigma={sigma:.4f} ч, N*={N_star}")
+        print(f"  Итерация {iteration}: N={N}, время={mean_res:.2f} ч, sigma={sigma:.4f} ч, N*={N_star}")
 
         if N_star <= N:
             print(f"  Точность достигнута!")
@@ -201,61 +268,69 @@ def calculate_required_runs(num_tracks: int, initial_runs: int, epsilon: float, 
     return N, 0, 0
 
 
-# основная программа
+# программа
 def main():
     print(f"Время моделирования: {T_MODEL_HOURS} ч ({T_MODEL_HOURS/24:.0f} сут)")
+    print(f"Интенсивность прихода составов: 1/{1/LAMBDA:.0f} час = {LAMBDA:.3f} состав/ч")
     print(f"Точность: {EPS*100}%, довер.вероятность: {ALPHA}, tα={TA}")
 
-    print("эксперимент 1: 4 ветки")
+    print("Эксперимент 1: 4 ветки")
 
     N_opt_4, mean_4, sigma_4 = calculate_required_runs(4, 50, EPS, TA)
 
-    # прогон для 4 веток
+    # Финальный прогон для 4 веток
     all_results_4 = []
-    for _ in range(N_opt_4):
-        train_times = []
-        current_time = 0
-        while current_time < T_MODEL_HOURS:
-            current_time += exp_random(1 / LAMBDA)
-            if current_time < T_MODEL_HOURS:
-                train_times.append(current_time)
+    all_compositions_4 = []
+    all_load_4 = []
+    for _ in range(max(N_opt_4, 10)):  # 10 прогонов для статистики
         station = SortingStation(4)
-        res = station.run(T_MODEL_HOURS, train_times)
+        res = station.run()
         all_results_4.append(res['avg_residence_time'])
+        all_compositions_4.append(res['compositions'])
+        all_load_4.append(res['avg_track_load'])
 
-    final_mean_4 = sum(all_results_4) / N_opt_4
-    final_std_4 = math.sqrt(sum((x - final_mean_4) ** 2 for x in all_results_4) / N_opt_4)
+    final_mean_4 = sum(all_results_4) / len(all_results_4)
+    final_compositions_4 = sum(all_compositions_4) / len(all_compositions_4)
+    final_load_4 = sum(all_load_4) / len(all_load_4)
+    final_std_4 = math.sqrt(sum((x - final_mean_4) ** 2 for x in all_results_4) / len(all_results_4))
+    rel_error_4 = final_std_4 / final_mean_4 * 100
 
     print(f"\nРезультаты для 4 веток:")
-    print(f"  Число реализаций: {N_opt_4}")
+    print(f"  Число реализаций: {len(all_results_4)}")
     print(f"  Среднее время пребывания вагона: {final_mean_4:.2f} ч ({final_mean_4*60:.1f} мин)")
+    print(f"  Всего обработано вагонов (ср.): {final_mean_4 * T_MODEL_HOURS / final_mean_4:.0f}")
+    print(f"  Сформировано составов (ср.): {final_compositions_4:.0f}")
+    print(f"  Загрузка веток: {final_load_4:.1f}%")
     print(f"  СКО: {final_std_4:.4f} ч")
-    print(f"  Относительная погрешность: {final_std_4/final_mean_4*100:.2f}%")
+    print(f"  Относительная погрешность: {rel_error_4:.2f}%")
 
-    print("эксперимент 2: 5 веток")
+    print("Эксперимент 2: 5 веток")
 
     N_opt_5, mean_5, sigma_5 = calculate_required_runs(5, 50, EPS, TA)
 
     all_results_5 = []
-    for _ in range(N_opt_5):
-        train_times = []
-        current_time = 0
-        while current_time < T_MODEL_HOURS:
-            current_time += exp_random(1 / LAMBDA)
-            if current_time < T_MODEL_HOURS:
-                train_times.append(current_time)
+    all_compositions_5 = []
+    all_load_5 = []
+    for _ in range(max(N_opt_5, 10)):
         station = SortingStation(5)
-        res = station.run(T_MODEL_HOURS, train_times)
+        res = station.run()
         all_results_5.append(res['avg_residence_time'])
+        all_compositions_5.append(res['compositions'])
+        all_load_5.append(res['avg_track_load'])
 
-    final_mean_5 = sum(all_results_5) / N_opt_5
-    final_std_5 = math.sqrt(sum((x - final_mean_5) ** 2 for x in all_results_5) / N_opt_5)
+    final_mean_5 = sum(all_results_5) / len(all_results_5)
+    final_compositions_5 = sum(all_compositions_5) / len(all_compositions_5)
+    final_load_5 = sum(all_load_5) / len(all_load_5)
+    final_std_5 = math.sqrt(sum((x - final_mean_5) ** 2 for x in all_results_5) / len(all_results_5))
+    rel_error_5 = final_std_5 / final_mean_5 * 100
 
     print(f"\nРезультаты для 5 веток:")
-    print(f"  Число реализаций: {N_opt_5}")
+    print(f"  Число реализаций: {len(all_results_5)}")
     print(f"  Среднее время пребывания вагона: {final_mean_5:.2f} ч ({final_mean_5*60:.1f} мин)")
+    print(f"  Сформировано составов (ср.): {final_compositions_5:.0f}")
+    print(f"  Загрузка веток: {final_load_5:.1f}%")
     print(f"  СКО: {final_std_5:.4f} ч")
-    print(f"  Относительная погрешность: {final_std_5/final_mean_5*100:.2f}%")
+    print(f"  Относительная погрешность: {rel_error_5:.2f}%")
 
     print("Анализ результатов")
 
@@ -264,6 +339,11 @@ def main():
     print(f"  Было (4 ветки): {final_mean_4:.2f} ч ({final_mean_4*60:.1f} мин)")
     print(f"  Стало (5 веток): {final_mean_5:.2f} ч ({final_mean_5*60:.1f} мин)")
 
+    print(f"\nЗагрузка веток:")
+    print(f"  4 ветки: {final_load_4:.1f}%")
+    print(f"  5 веток: {final_load_5:.1f}%")
+
 
 if __name__ == "__main__":
+    random.seed(42)
     main()

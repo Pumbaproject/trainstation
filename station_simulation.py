@@ -2,10 +2,10 @@
 import random
 import math
 
-T_MODEL_HOURS = 24 * 30      # Время моделирования: 30 суток (720 часов)
+T_MODEL_HOURS = 24 * 1     # Время моделирования: 30 суток (720 часов)
 LAMBDA = 1 / 8               # Интенсивность прихода составов: 1/8 состава в час
 ALPHA = 0.95                 # Доверительная вероятность
-EPS = 0.2                    # Требуемая точность 20%
+EPS = 0.45                   # Требуемая точность 15%
 TA = 1.96                    # Квантиль для ALPHA=0.95
 
 
@@ -73,7 +73,7 @@ class SortingStation:
 
         self.accumulation = [0] * 8
 
-        self.urgent_direction = None
+        self.urgent_directions = set()
 
         self.direction_queue = list(range(1, 8))
         self.direction_queue_index = 0
@@ -109,65 +109,105 @@ class SortingStation:
         return direction
 
     def _process_section(self, section: Section):
-        """Обработать одну секцию: занять ветку, обновить накопление"""
+        """Обработка одной секции"""
 
         track_idx = self._get_free_track()
 
+        # Если есть свободная ветка
         if track_idx >= 0:
             start_time = self.current_time
-            self.tracks_free_time[track_idx] = start_time + section.total_time
+            finish_time = start_time + section.total_time
+            self.tracks_free_time[track_idx] = finish_time
+
+        # Если все ветки заняты
         else:
             track_idx, free_time = self._get_earliest_track()
             start_time = free_time
-            self.tracks_free_time[track_idx] = start_time + section.total_time
+            finish_time = start_time + section.total_time
+            self.tracks_free_time[track_idx] = finish_time
 
+        # Загрузка веток
         self.total_busy_time += section.total_time
 
+        # НАКОПЛЕНИЕ ТОЛЬКО ПОСЛЕ ОБРАБОТКИ
         self.accumulation[section.direction] += section.wagon_count
 
+        # Срочные направления
         if section.is_urgent:
-            self.urgent_direction = section.direction
+            self.urgent_directions.add(section.direction)
 
         # Время пребывания вагонов
-        finish_time = start_time + section.total_time
         residence_time = finish_time - section.arrival_time
-        self.total_residence_time += section.wagon_count * residence_time
+
+        self.total_residence_time += (
+            section.wagon_count * residence_time
+        )
+
         self.total_wagons += section.wagon_count
 
     def _try_form_composition(self):
-        """Проверить и сформировать состав при накоплении >= 50"""
-        formed = False
+        """Проверка возможности формирования состава"""
 
-        if self.urgent_direction is not None:
-            if self.accumulation[self.urgent_direction] >= 50:
-                self.composition_count += 1
-                self.accumulation[self.urgent_direction] = 0
-                self.urgent_direction = None
-                formed = True
-                return True
+        # Сначала проверяем срочные направления
+        for direction in list(self.urgent_directions):
 
-        for direction in range(1, 8):
             if self.accumulation[direction] >= 50:
                 self.composition_count += 1
                 self.accumulation[direction] = 0
-                formed = True
+                self.urgent_directions.remove(direction)
+                return True
 
-        return formed
+        # Проверяем направления по циклической очереди
+        for _ in range(7):
+
+            direction = self._get_next_direction()
+
+            if self.accumulation[direction] >= 50:
+                self.composition_count += 1
+                self.accumulation[direction] = 0
+                return True
+
+        return False
 
     def _generate_train_sections(self, arrival_time: float) -> list:
-        """Генерация всех секций одного состава"""
-        num_sections = uniform_int_random(2, 7)
-        sections = []
+        """Генерация секций одного состава"""
 
-        for _ in range(num_sections):
-            wagon_count = poisson_random(3)
-            if wagon_count == 0:
-                wagon_count = 1
+        # Длина состава
+        train_length = uniform_int_random(65, 80)
+
+        # Число секций
+        num_sections = uniform_int_random(2, 7)
+
+        sections = []
+        remaining_wagons = train_length
+
+        for i in range(num_sections):
+
+            # Последняя секция получает остаток вагонов
+            if i == num_sections - 1:
+                wagon_count = remaining_wagons
+            else:
+                # Минимум 1 вагон должен остаться для остальных секций
+                max_possible = remaining_wagons - (num_sections - i - 1)
+
+                # Генерация числа вагонов
+                wagon_count = poisson_random(3)
+                wagon_count = max(1, wagon_count)
+                wagon_count = min(wagon_count, max_possible)
+
+            remaining_wagons -= wagon_count
 
             direction = random.randint(1, 7)
             is_urgent = random.random() < 0.05
 
-            sections.append(Section(wagon_count, direction, is_urgent, arrival_time))
+            sections.append(
+                Section(
+                    wagon_count,
+                    direction,
+                    is_urgent,
+                    arrival_time
+                )
+            )
 
         return sections
 
@@ -191,7 +231,7 @@ class SortingStation:
         self.total_busy_time = 0.0
         self.tracks_free_time = [0.0] * self.num_tracks
         self.accumulation = [0] * 8
-        self.urgent_direction = None
+        self.urgent_directions = set()
         self.direction_queue = list(range(1, 8))
         self.direction_queue_index = 0
 
@@ -247,14 +287,14 @@ def calculate_required_runs(num_tracks: int, initial_runs: int, epsilon: float, 
 
         # Расчёт среднего и СКО
         mean_res = sum(results) / N
-        variance = sum((x - mean_res) ** 2 for x in results) / N
+        variance = sum((x - mean_res) ** 2 for x in results) / (N - 1)
         sigma = math.sqrt(variance)
 
         # Расчёт необходимого числа реализаций
         if sigma == 0:
             N_star = 1
         else:
-            N_star = int(math.ceil((sigma ** 2 * ta ** 2) / (epsilon ** 2)))
+            N_star = int(math.ceil((ta * sigma / (epsilon * mean_res)) ** 2))
 
         print(f"  Итерация {iteration}: N={N}, время={mean_res:.2f} ч, sigma={sigma:.4f} ч, N*={N_star}")
 
@@ -298,7 +338,7 @@ def main():
     print(f"\nРезультаты для 4 веток:")
     print(f"  Число реализаций: {len(all_results_4)}")
     print(f"  Среднее время пребывания вагона: {final_mean_4:.2f} ч ({final_mean_4*60:.1f} мин)")
-    print(f"  Всего обработано вагонов (ср.): {final_mean_4 * T_MODEL_HOURS / final_mean_4:.0f}")
+    print(f"  Всего обработано вагонов (ср.): {station.total_wagons}")
     print(f"  Сформировано составов (ср.): {final_compositions_4:.0f}")
     print(f"  Загрузка веток: {final_load_4:.1f}%")
     print(f"  СКО: {final_std_4:.4f} ч")

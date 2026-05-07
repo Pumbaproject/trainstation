@@ -1,12 +1,15 @@
-
+import numpy as np
+import matplotlib.pyplot as plt
 import random
 import math
+import Forks
 
-T_MODEL_HOURS = 24 * 1     # Время моделирования: 30 суток (720 часов)
-LAMBDA = 1 / 8               # Интенсивность прихода составов: 1/8 состава в час
-ALPHA = 0.95                 # Доверительная вероятность
-EPS = 0.45                   # Требуемая точность 15%
-TA = 1.96                    # Квантиль для ALPHA=0.95
+T_MODEL_HOURS = 24 * 30 # Время моделирования: 30 суток (720 часов)
+LAMBDA = 1 / 8 # Интенсивность прихода составов: 1/8 состава в час
+ALPHA = 0.95 # Доверительная вероятность
+EPS = 0.20 # Требуемая точность 15%
+TA = 1.96 # Квантиль для ALPHA=0.95
+URGENT_PROB = 0.20 # вероятность срочных секций
 
 
 # генератор случ чисел
@@ -198,7 +201,7 @@ class SortingStation:
             remaining_wagons -= wagon_count
 
             direction = random.randint(1, 7)
-            is_urgent = random.random() < 0.05
+            is_urgent = random.random() < URGENT_PROB
 
             sections.append(
                 Section(
@@ -295,7 +298,7 @@ def calculate_required_runs(num_tracks: int, initial_runs: int, epsilon: float, 
             N_star = 1
         else:
             N_star = int(math.ceil((ta * sigma / (epsilon * mean_res)) ** 2))
-
+                
         print(f"  Итерация {iteration}: N={N}, время={mean_res:.2f} ч, sigma={sigma:.4f} ч, N*={N_star}")
 
         if N_star <= N:
@@ -314,8 +317,8 @@ def main():
     print(f"Интенсивность прихода составов: 1/{1/LAMBDA:.0f} час = {LAMBDA:.3f} состав/ч")
     print(f"Точность: {EPS*100}%, довер.вероятность: {ALPHA}, tα={TA}")
 
-    print("Эксперимент 1: 4 ветки")
 
+    print("Эксперимент 4: 4 ветки")
     N_opt_4, mean_4, sigma_4 = calculate_required_runs(4, 50, EPS, TA)
 
     # Финальный прогон для 4 веток
@@ -337,51 +340,53 @@ def main():
 
     print(f"\nРезультаты для 4 веток:")
     print(f"  Число реализаций: {len(all_results_4)}")
-    print(f"  Среднее время пребывания вагона: {final_mean_4:.2f} ч ({final_mean_4*60:.1f} мин)")
+    print(f"  Среднее время пребывания вагона: {final_mean_4:.2f} ч ({final_mean_4*60:.3f} мин)")
     print(f"  Всего обработано вагонов (ср.): {station.total_wagons}")
     print(f"  Сформировано составов (ср.): {final_compositions_4:.0f}")
     print(f"  Загрузка веток: {final_load_4:.1f}%")
     print(f"  СКО: {final_std_4:.4f} ч")
     print(f"  Относительная погрешность: {rel_error_4:.2f}%")
 
-    print("Эксперимент 2: 5 веток")
 
-    N_opt_5, mean_5, sigma_5 = calculate_required_runs(5, 50, EPS, TA)
+# Ветки 1-3 5-10
+    # Forks.TestForks(T_MODEL_HOURS, LAMBDA, ALPHA, TA, EPS)
 
-    all_results_5 = []
-    all_compositions_5 = []
-    all_load_5 = []
-    for _ in range(max(N_opt_5, 10)):
-        station = SortingStation(5)
-        res = station.run()
-        all_results_5.append(res['avg_residence_time'])
-        all_compositions_5.append(res['compositions'])
-        all_load_5.append(res['avg_track_load'])
 
-    final_mean_5 = sum(all_results_5) / len(all_results_5)
-    final_compositions_5 = sum(all_compositions_5) / len(all_compositions_5)
-    final_load_5 = sum(all_load_5) / len(all_load_5)
-    final_std_5 = math.sqrt(sum((x - final_mean_5) ** 2 for x in all_results_5) / len(all_results_5))
-    rel_error_5 = final_std_5 / final_mean_5 * 100
+    # urgent_probs = [0.05, 0.1, 0.2, 0.4, 0.6]
+    # avg_times_urgent = []
 
-    print(f"\nРезультаты для 5 веток:")
-    print(f"  Число реализаций: {len(all_results_5)}")
-    print(f"  Среднее время пребывания вагона: {final_mean_5:.2f} ч ({final_mean_5*60:.1f} мин)")
-    print(f"  Сформировано составов (ср.): {final_compositions_5:.0f}")
-    print(f"  Загрузка веток: {final_load_5:.1f}%")
-    print(f"  СКО: {final_std_5:.4f} ч")
-    print(f"  Относительная погрешность: {rel_error_5:.2f}%")
+    # for prob in urgent_probs:
 
-    print("Анализ результатов")
+    #     URGENT_PROB = prob
 
-    improvement = (final_mean_4 - final_mean_5) / final_mean_4 * 100
-    print(f"Добавление 5-й ветки снизило время пребывания вагона на {improvement:.1f}%")
-    print(f"  Было (4 ветки): {final_mean_4:.2f} ч ({final_mean_4*60:.1f} мин)")
-    print(f"  Стало (5 веток): {final_mean_5:.2f} ч ({final_mean_5*60:.1f} мин)")
+    #     results = []
 
-    print(f"\nЗагрузка веток:")
-    print(f"  4 ветки: {final_load_4:.1f}%")
-    print(f"  5 веток: {final_load_5:.1f}%")
+    #     for _ in range(20):
+
+    #         station = SortingStation(4)
+
+    #         res = station.run()
+
+    #         results.append(res['avg_residence_time'] * 60)
+
+    #     avg_time = sum(results) / len(results)
+
+    #     avg_times_urgent.append(avg_time)
+
+    #     print(f"Срочность: {prob*100:.0f}% -> {avg_time:.2f} мин")
+
+    # plt.figure()
+
+    # plt.plot([p * 100 for p in urgent_probs], avg_times_urgent, marker='o')
+
+    # plt.xlabel("Доля срочных секций, %")
+    # plt.ylabel("Среднее время пребывания вагона, мин")
+
+    # plt.title("Влияние доли срочных секций")
+
+    # plt.grid(True)
+
+    # plt.show()
 
 
 if __name__ == "__main__":
